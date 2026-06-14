@@ -1,0 +1,193 @@
+use std::{fs, path::Path};
+
+use image_chooser::{ImageStatus, Project};
+use tempfile::TempDir;
+
+fn write_photo(path: &Path) {
+    fs::create_dir_all(path.parent().expect("test path has parent")).expect("create parent dir");
+    fs::write(
+        path,
+        b"not a real jpeg, but enough for import/export core tests",
+    )
+    .expect("write test photo");
+}
+
+#[test]
+fn migrations_create_the_image_choices_schema_to_avoid_runtime_project_file_failures() {
+    let temp = TempDir::new().expect("create temp dir");
+    let db_path = temp.path().join("project.sqlite");
+
+    let project = Project::open_or_create(&db_path).expect("open project");
+
+    assert_eq!(project.image_count().expect("count images"), 0);
+}
+
+#[test]
+fn import_reimport_and_queue_rules_preserve_decisions_and_stable_positions() {
+    let temp = TempDir::new().expect("create temp dir");
+    let project =
+        Project::open_or_create(temp.path().join("project.sqlite")).expect("open project");
+    let source = temp.path().join("source");
+    write_photo(&source.join("b.jpg"));
+    write_photo(&source.join("a.jpg"));
+    fs::write(source.join("notes.txt"), b"ignore me").expect("write unsupported file");
+
+    let summary = project
+        .import_folder(&source)
+        .expect("import source folder");
+
+    assert_eq!(summary.imported, 2);
+    assert_eq!(summary.unsupported, 1);
+    let images = project.images_by_position().expect("list images");
+    assert_eq!(images[0].filename(), "a.jpg");
+    assert_eq!(images[0].position, 1);
+    assert_eq!(images[1].filename(), "b.jpg");
+    assert_eq!(images[1].position, 2);
+
+    project
+        .set_status(images[0].id, ImageStatus::Selected)
+        .expect("persist selected choice");
+    let repeat = project
+        .import_folder(&source)
+        .expect("re-import source folder");
+    assert_eq!(repeat.imported, 0);
+    assert_eq!(repeat.duplicates, 2);
+    let after_repeat = project.images_by_position().expect("list after reimport");
+    assert_eq!(after_repeat[0].status, ImageStatus::Selected);
+    assert_eq!(after_repeat[0].position, 1);
+
+    write_photo(&source.join("c.jpg"));
+    let append = project
+        .import_folder(&source)
+        .expect("import appended photo");
+    assert_eq!(append.imported, 1);
+    let after_append = project.images_by_position().expect("list after append");
+    assert_eq!(after_append[2].filename(), "c.jpg");
+    assert_eq!(after_append[2].position, 3);
+
+    let next = project
+        .next_unseen()
+        .expect("query next unseen")
+        .expect("has unseen");
+    assert_eq!(next.filename(), "b.jpg");
+
+    project
+        .set_status(next.id, ImageStatus::Undecided)
+        .expect("persist later choice");
+    let next = project
+        .next_unseen()
+        .expect("query next unseen")
+        .expect("has unseen");
+    assert_eq!(next.filename(), "c.jpg");
+}
+
+#[test]
+fn later_review_query_advances_by_position_without_mixing_in_unseen_images() {
+    let temp = TempDir::new().expect("create temp dir");
+    let project =
+        Project::open_or_create(temp.path().join("project.sqlite")).expect("open project");
+    let source = temp.path().join("source");
+    write_photo(&source.join("a.jpg"));
+    write_photo(&source.join("b.jpg"));
+    write_photo(&source.join("c.jpg"));
+    project
+        .import_folder(&source)
+        .expect("import source folder");
+    let images = project.images_by_position().expect("list images");
+    project
+        .set_status(images[0].id, ImageStatus::Undecided)
+        .expect("mark first later");
+    project
+        .set_status(images[2].id, ImageStatus::Undecided)
+        .expect("mark third later");
+
+    let first_later = project
+        .next_undecided_after(None)
+        .expect("query first later")
+        .expect("has first later");
+    assert_eq!(first_later.filename(), "a.jpg");
+    let second_later = project
+        .next_undecided_after(Some(first_later.position))
+        .expect("query second later")
+        .expect("has second later");
+    assert_eq!(second_later.filename(), "c.jpg");
+    assert!(
+        project
+            .next_undecided_after(Some(second_later.position))
+            .expect("query after last later")
+            .is_none()
+    );
+}
+
+#[test]
+fn export_copies_only_selected_images_with_unique_names_and_manifest() {
+    let temp = TempDir::new().expect("create temp dir");
+    let project =
+        Project::open_or_create(temp.path().join("project.sqlite")).expect("open project");
+    let source = temp.path().join("source");
+    write_photo(&source.join("one/IMG_0001.jpg"));
+    write_photo(&source.join("two/IMG_0001.jpg"));
+    write_photo(&source.join("three/IMG_0002.png"));
+    project
+        .import_folder(&source)
+        .expect("import source folder");
+    let images = project.images_by_position().expect("list images");
+
+    for image in &images {
+        let status = if image.filename() == "IMG_0001.jpg" {
+            ImageStatus::Selected
+        } else {
+            ImageStatus::Rejected
+        };
+        project
+            .set_status(image.id, status)
+            .expect("persist export test status");
+    }
+
+    let export_root = temp.path().join("exports");
+    let summary = project
+        .export_selected(&export_root)
+        .expect("export selected images");
+
+    assert_eq!(summary.copied, 2);
+    assert_eq!(summary.failed.len(), 0);
+    assert!(summary.export_dir.exists());
+    assert!(summary.export_dir.join("000001_IMG_0001.jpg").exists());
+    assert!(summary.export_dir.join("000002_IMG_0001.jpg").exists());
+    assert!(!summary.export_dir.join("000003_IMG_0002.png").exists());
+
+    let manifest =
+        fs::read_to_string(summary.export_dir.join("manifest.csv")).expect("read manifest");
+    assert!(manifest.contains("exported_filename,original_path,status,position"));
+    assert!(manifest.contains("000001_IMG_0001.jpg"));
+    assert!(manifest.contains("000002_IMG_0001.jpg"));
+    assert!(manifest.contains("selected"));
+}
+
+#[test]
+fn export_continues_after_a_selected_file_cannot_be_copied() {
+    let temp = TempDir::new().expect("create temp dir");
+    let project =
+        Project::open_or_create(temp.path().join("project.sqlite")).expect("open project");
+    let source = temp.path().join("source");
+    write_photo(&source.join("a.jpg"));
+    write_photo(&source.join("b.jpg"));
+    project
+        .import_folder(&source)
+        .expect("import source folder");
+    let images = project.images_by_position().expect("list images");
+    for image in &images {
+        project
+            .set_status(image.id, ImageStatus::Selected)
+            .expect("select image");
+    }
+    fs::remove_file(&images[0].path).expect("remove one source file to simulate export failure");
+
+    let summary = project
+        .export_selected(temp.path().join("exports"))
+        .expect("export selected images");
+
+    assert_eq!(summary.copied, 1);
+    assert_eq!(summary.failed.len(), 1);
+    assert!(summary.export_dir.join("000002_b.jpg").exists());
+}
