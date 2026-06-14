@@ -1,12 +1,16 @@
 use std::{
     cell::RefCell,
-    fs,
+    fs::{self, File},
+    io::BufReader,
     path::{Path, PathBuf},
     time::SystemTime,
 };
 
-use chrono::{DateTime, Local, SecondsFormat, Utc};
+use chrono::{DateTime, Local, NaiveDate, SecondsFormat, Utc};
 use directories::BaseDirs;
+use exif::{
+    Field as ExifField, In as ExifIn, Reader as ExifReader, Tag as ExifTag, Value as ExifValue,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 use rusqlite_migration::{M, Migrations};
 use thiserror::Error;
@@ -508,6 +512,13 @@ fn now_string() -> String {
 }
 
 fn ordering_metadata(path: &Path) -> OrderingMetadata {
+    if let Some(timestamp) = exif_capture_time_to_string(path) {
+        return OrderingMetadata {
+            timestamp: Some(timestamp),
+            source: "exif".to_owned(),
+        };
+    }
+
     match fs::metadata(path)
         .and_then(|metadata| metadata.modified())
         .ok()
@@ -522,6 +533,54 @@ fn ordering_metadata(path: &Path) -> OrderingMetadata {
             source: "path".to_owned(),
         },
     }
+}
+
+fn exif_capture_time_to_string(path: &Path) -> Option<String> {
+    let file = File::open(path).ok()?;
+    let mut reader = BufReader::new(file);
+    let exif = ExifReader::new().read_from_container(&mut reader).ok()?;
+
+    for tag in [
+        ExifTag::DateTimeOriginal,
+        ExifTag::DateTimeDigitized,
+        ExifTag::DateTime,
+    ] {
+        if let Some(field) = exif.get_field(tag, ExifIn::PRIMARY)
+            && let Some(timestamp) = exif_datetime_field_to_string(field)
+        {
+            return Some(timestamp);
+        }
+    }
+
+    None
+}
+
+fn exif_datetime_field_to_string(field: &ExifField) -> Option<String> {
+    let ExifValue::Ascii(values) = &field.value else {
+        return None;
+    };
+
+    values
+        .iter()
+        .find_map(|value| parse_exif_datetime_to_utc_string(value))
+}
+
+fn parse_exif_datetime_to_utc_string(value: &[u8]) -> Option<String> {
+    let datetime = exif::DateTime::from_ascii(value).ok()?;
+    let naive = NaiveDate::from_ymd_opt(
+        datetime.year.into(),
+        datetime.month.into(),
+        datetime.day.into(),
+    )?
+    .and_hms_opt(
+        datetime.hour.into(),
+        datetime.minute.into(),
+        datetime.second.into(),
+    )?;
+    Some(
+        DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc)
+            .to_rfc3339_opts(SecondsFormat::Secs, true),
+    )
 }
 
 fn system_time_to_string(time: SystemTime) -> String {

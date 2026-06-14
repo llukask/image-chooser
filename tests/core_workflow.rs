@@ -1,5 +1,7 @@
-use std::{fs, path::Path};
+use std::{fs, io::Cursor, path::Path};
 
+use exif::{Field, In, Tag, Value, experimental::Writer as ExifWriter};
+use filetime::FileTime;
 use image_chooser::{ImageStatus, Project};
 use tempfile::TempDir;
 
@@ -10,6 +12,37 @@ fn write_photo(path: &Path) {
         b"not a real jpeg, but enough for import/export core tests",
     )
     .expect("write test photo");
+}
+
+fn write_photo_with_exif_datetime_original(path: &Path, datetime: &str) {
+    fs::create_dir_all(path.parent().expect("test path has parent")).expect("create parent dir");
+    let field = Field {
+        tag: Tag::DateTimeOriginal,
+        ifd_num: In::PRIMARY,
+        value: Value::Ascii(vec![datetime.as_bytes().to_vec()]),
+    };
+    let mut writer = ExifWriter::new();
+    writer.push_field(&field);
+    let mut exif_data = Cursor::new(Vec::new());
+    writer
+        .write(&mut exif_data, false)
+        .expect("encode test exif data");
+
+    let mut app1_payload = b"Exif\0\0".to_vec();
+    app1_payload.extend(exif_data.into_inner());
+    let app1_len = app1_payload.len() + 2;
+    assert!(app1_len <= u16::MAX as usize, "test APP1 segment fits");
+
+    let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe1];
+    jpeg.extend((app1_len as u16).to_be_bytes());
+    jpeg.extend(app1_payload);
+    jpeg.extend([0xff, 0xd9]);
+    fs::write(path, jpeg).expect("write test jpeg with exif");
+}
+
+fn set_mtime(path: &Path, unix_seconds: i64) {
+    filetime::set_file_mtime(path, FileTime::from_unix_time(unix_seconds, 0))
+        .expect("set test photo mtime");
 }
 
 #[test]
@@ -79,6 +112,57 @@ fn import_reimport_and_queue_rules_preserve_decisions_and_stable_positions() {
         .expect("query next unseen")
         .expect("has unseen");
     assert_eq!(next.filename(), "c.jpg");
+}
+
+#[test]
+fn import_prefers_exif_capture_time_over_file_mtime_to_keep_camera_rolls_chronological() {
+    let temp = TempDir::new().expect("create temp dir");
+    let project =
+        Project::open_or_create(temp.path().join("project.sqlite")).expect("open project");
+    let source = temp.path().join("source");
+    let mtime_only = source.join("a_mtime_only.jpg");
+    let exif_photo = source.join("z_exif_photo.jpg");
+    write_photo(&mtime_only);
+    write_photo_with_exif_datetime_original(&exif_photo, "2010:01:02 03:04:05");
+    set_mtime(&mtime_only, 1_577_836_800);
+    set_mtime(&exif_photo, 1_893_456_000);
+
+    project
+        .import_folder(&source)
+        .expect("import source folder");
+
+    let images = project.images_by_position().expect("list images");
+    assert_eq!(images[0].filename(), "z_exif_photo.jpg");
+    assert_eq!(images[0].ordering_source, "exif");
+    assert_eq!(
+        images[0].ordering_timestamp.as_deref(),
+        Some("2010-01-02T03:04:05Z")
+    );
+    assert_eq!(images[1].filename(), "a_mtime_only.jpg");
+    assert_eq!(images[1].ordering_source, "mtime");
+}
+
+#[test]
+fn import_uses_file_mtime_when_exif_capture_time_is_absent_to_keep_plain_images_ordered() {
+    let temp = TempDir::new().expect("create temp dir");
+    let project =
+        Project::open_or_create(temp.path().join("project.sqlite")).expect("open project");
+    let source = temp.path().join("source");
+    let photo = source.join("plain.jpg");
+    write_photo(&photo);
+    set_mtime(&photo, 946_684_800);
+
+    project
+        .import_folder(&source)
+        .expect("import source folder");
+
+    let images = project.images_by_position().expect("list images");
+    assert_eq!(images[0].filename(), "plain.jpg");
+    assert_eq!(images[0].ordering_source, "mtime");
+    assert_eq!(
+        images[0].ordering_timestamp.as_deref(),
+        Some("2000-01-01T00:00:00Z")
+    );
 }
 
 #[test]
