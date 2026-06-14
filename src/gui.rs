@@ -372,8 +372,7 @@ impl ImageChooserApp {
             .into()
     }
 
-    fn view_image_area(&self, zoom: bool) -> Element<'_, Message> {
-        let height = if zoom { Length::Fill } else { Length::Fill };
+    fn view_image_area(&self, _zoom: bool) -> Element<'_, Message> {
         let body: Element<'_, Message> = match &self.load_state {
             LoadState::Idle => text("Kein Bild geladen").size(34).into(),
             LoadState::Loading => text("Bild wird geladen …").size(38).into(),
@@ -403,7 +402,7 @@ impl ImageChooserApp {
 
         container(body)
             .width(Length::Fill)
-            .height(height)
+            .height(Length::Fill)
             .center_x(Length::Fill)
             .center_y(Length::Fill)
             .into()
@@ -566,21 +565,19 @@ impl ImageChooserApp {
 
         match finished.result {
             Ok(image) => {
-                if let Some(project) = &self.project {
-                    if let Err(error) = project.clear_last_error(finished.image_id) {
-                        self.status = format!(
-                            "Bild geladen, Fehlerstatus konnte nicht gelöscht werden: {error}"
-                        );
-                    }
+                if let Some(project) = &self.project
+                    && let Err(error) = project.clear_last_error(finished.image_id)
+                {
+                    self.status =
+                        format!("Bild geladen, Fehlerstatus konnte nicht gelöscht werden: {error}");
                 }
                 self.load_state = LoadState::Loaded { image };
             }
             Err(message) => {
-                if let Some(project) = &self.project {
-                    if let Err(error) = project.store_last_error(finished.image_id, &message) {
-                        self.status =
-                            format!("Bildfehler konnte nicht gespeichert werden: {error}");
-                    }
+                if let Some(project) = &self.project
+                    && let Err(error) = project.store_last_error(finished.image_id, &message)
+                {
+                    self.status = format!("Bildfehler konnte nicht gespeichert werden: {error}");
                 }
                 self.load_state = LoadState::Failed { message };
             }
