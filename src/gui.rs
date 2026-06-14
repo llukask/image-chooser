@@ -1,10 +1,14 @@
 use std::path::PathBuf;
 
 use iced::{
-    ContentFit, Element, Length, Subscription, Task, Theme, keyboard,
+    ContentFit, Element, Length, Subscription, Task, Theme, event, keyboard, mouse,
     widget::{button, column, container, image as iced_image, row, text},
 };
 use image_chooser::{ImageChoice, ImageStatus, Project, StatusCounts, default_project_path};
+
+const IMAGE_ZOOM_MIN: f32 = 1.0;
+const IMAGE_ZOOM_MAX: f32 = 8.0;
+const IMAGE_ZOOM_STEP: f32 = 0.15;
 
 pub fn run_gui(project_path: Option<PathBuf>) -> iced::Result {
     iced::application(
@@ -31,6 +35,7 @@ struct ImageChooserApp {
     review_after_position: Option<i64>,
     load_state: LoadState,
     preload: PreloadState,
+    image_zoom: f32,
     undo_stack: Vec<UndoAction>,
     status: String,
     zoom: bool,
@@ -91,6 +96,7 @@ enum Message {
     ExitReviewLater,
     ImageLoaded(ImageLoadFinished),
     ImagePreloaded(ImageLoadFinished),
+    MouseWheelZoom(f32),
     CloseZoom,
     KeyboardShortcut(KeyboardShortcut),
 }
@@ -125,6 +131,7 @@ impl ImageChooserApp {
             review_after_position: None,
             load_state: LoadState::Idle,
             preload: PreloadState::Idle,
+            image_zoom: IMAGE_ZOOM_MIN,
             undo_stack: Vec::new(),
             status: String::new(),
             zoom: false,
@@ -190,6 +197,7 @@ impl ImageChooserApp {
             }
             Message::ImageLoaded(finished) => self.finish_image_load(finished),
             Message::ImagePreloaded(finished) => self.finish_preload(finished),
+            Message::MouseWheelZoom(delta_y) => self.apply_mouse_wheel_zoom(delta_y),
             Message::CloseZoom => {
                 self.zoom = false;
                 Task::none()
@@ -199,7 +207,7 @@ impl ImageChooserApp {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        keyboard::listen().filter_map(|event| {
+        let keyboard = keyboard::listen().filter_map(|event| {
             let keyboard::Event::KeyPressed {
                 modified_key,
                 repeat: false,
@@ -227,7 +235,16 @@ impl ImageChooserApp {
                 }
                 _ => None,
             }
-        })
+        });
+
+        let mouse_wheel = event::listen().filter_map(|event| match event {
+            iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                Some(Message::MouseWheelZoom(scroll_delta_y(delta)))
+            }
+            _ => None,
+        });
+
+        Subscription::batch([keyboard, mouse_wheel])
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -394,9 +411,16 @@ impl ImageChooserApp {
             LoadState::Loaded { image } => column![
                 iced_image(image.handle.clone())
                     .content_fit(ContentFit::Contain)
+                    .scale(self.image_zoom)
                     .width(Length::Fill)
                     .height(Length::Fill),
-                text(format!("{} × {}", image.width, image.height)).size(18),
+                text(format!(
+                    "{} × {} · Mausrad = Zoom ({:.0}%)",
+                    image.width,
+                    image.height,
+                    self.image_zoom * 100.0
+                ))
+                .size(18),
             ]
             .spacing(8)
             .width(Length::Fill)
@@ -493,6 +517,7 @@ impl ImageChooserApp {
         match image_result {
             Some(Ok(Some(image))) => {
                 self.current = Some(image);
+                self.reset_image_zoom();
                 self.status = "Rückgängig gemacht.".to_owned();
                 self.load_current_image()
             }
@@ -522,6 +547,15 @@ impl ImageChooserApp {
         }
     }
 
+    fn apply_mouse_wheel_zoom(&mut self, delta_y: f32) -> Task<Message> {
+        if !matches!(self.load_state, LoadState::Loaded { .. }) || delta_y == 0.0 {
+            return Task::none();
+        }
+
+        self.image_zoom = zoom_scale_after_scroll(self.image_zoom, delta_y);
+        Task::none()
+    }
+
     fn load_next_image(&mut self) -> Task<Message> {
         let Some(project) = &self.project else {
             return Task::none();
@@ -535,12 +569,14 @@ impl ImageChooserApp {
         match next {
             Ok(Some(image)) => {
                 self.current = Some(image);
+                self.reset_image_zoom();
                 self.load_current_image()
             }
             Ok(None) => {
                 self.current = None;
                 self.load_state = LoadState::Idle;
                 self.clear_preload();
+                self.reset_image_zoom();
                 self.refresh_counts();
                 Task::none()
             }
@@ -555,6 +591,7 @@ impl ImageChooserApp {
         let Some(current) = &self.current else {
             self.load_state = LoadState::Idle;
             self.clear_preload();
+            self.reset_image_zoom();
             return Task::none();
         };
 
@@ -703,6 +740,10 @@ impl ImageChooserApp {
         self.preload = PreloadState::Idle;
     }
 
+    fn reset_image_zoom(&mut self) {
+        self.image_zoom = IMAGE_ZOOM_MIN;
+    }
+
     fn refresh_counts(&mut self) {
         if let Some(project) = &self.project {
             match project.status_counts() {
@@ -735,6 +776,24 @@ fn load_image_for_display(path: PathBuf) -> Result<LoadedImage, String> {
     })
 }
 
+fn scroll_delta_y(delta: mouse::ScrollDelta) -> f32 {
+    match delta {
+        mouse::ScrollDelta::Lines { y, .. } | mouse::ScrollDelta::Pixels { y, .. } => y,
+    }
+}
+
+fn zoom_scale_after_scroll(current_scale: f32, delta_y: f32) -> f32 {
+    let next_scale = if delta_y > 0.0 {
+        current_scale * (1.0 + IMAGE_ZOOM_STEP)
+    } else if delta_y < 0.0 {
+        current_scale / (1.0 + IMAGE_ZOOM_STEP)
+    } else {
+        current_scale
+    };
+
+    next_scale.clamp(IMAGE_ZOOM_MIN, IMAGE_ZOOM_MAX)
+}
+
 fn centered<'a>(content: impl Into<Element<'a, Message>>) -> container::Container<'a, Message> {
     container(content)
         .width(Length::Fill)
@@ -762,5 +821,28 @@ fn choice_status_text(action: ChoiceAction) -> &'static str {
         ChoiceAction::Select => "Gespeichert: Ja, drucken.",
         ChoiceAction::Reject => "Gespeichert: Nein, nicht drucken.",
         ChoiceAction::Later => "Gespeichert: Später entscheiden.",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{IMAGE_ZOOM_MAX, IMAGE_ZOOM_MIN, zoom_scale_after_scroll};
+
+    #[test]
+    fn mouse_wheel_zoom_clamps_to_safe_bounds_to_keep_images_recoverable() {
+        assert_eq!(
+            zoom_scale_after_scroll(IMAGE_ZOOM_MIN, -1.0),
+            IMAGE_ZOOM_MIN
+        );
+        assert_eq!(zoom_scale_after_scroll(IMAGE_ZOOM_MAX, 1.0), IMAGE_ZOOM_MAX);
+    }
+
+    #[test]
+    fn mouse_wheel_zoom_changes_by_one_step_per_scroll_event_for_predictable_control() {
+        let zoomed_in = zoom_scale_after_scroll(1.0, 1.0);
+        assert!(zoomed_in > 1.0);
+
+        let zoomed_out = zoom_scale_after_scroll(zoomed_in, -1.0);
+        assert!((zoomed_out - 1.0).abs() < f32::EPSILON);
     }
 }
