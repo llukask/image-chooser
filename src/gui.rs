@@ -30,6 +30,7 @@ struct ImageChooserApp {
     queue: SelectionQueue,
     review_after_position: Option<i64>,
     load_state: LoadState,
+    preload: PreloadState,
     undo_stack: Vec<UndoAction>,
     status: String,
     zoom: bool,
@@ -47,6 +48,18 @@ enum LoadState {
     Loading,
     Loaded { image: LoadedImage },
     Failed { message: String },
+}
+
+#[derive(Debug, Clone)]
+enum PreloadState {
+    Idle,
+    Loading {
+        image_id: i64,
+    },
+    Ready {
+        image_id: i64,
+        result: Result<LoadedImage, String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +90,7 @@ enum Message {
     StartReviewLater,
     ExitReviewLater,
     ImageLoaded(ImageLoadFinished),
+    ImagePreloaded(ImageLoadFinished),
     CloseZoom,
     KeyboardShortcut(KeyboardShortcut),
 }
@@ -110,6 +124,7 @@ impl ImageChooserApp {
             queue: SelectionQueue::MainUnseen,
             review_after_position: None,
             load_state: LoadState::Idle,
+            preload: PreloadState::Idle,
             undo_stack: Vec::new(),
             status: String::new(),
             zoom: false,
@@ -161,6 +176,7 @@ impl ImageChooserApp {
                 self.queue = SelectionQueue::ReviewLater;
                 self.review_after_position = None;
                 self.zoom = false;
+                self.clear_preload();
                 self.status = "Später-Entscheidungen ansehen.".to_owned();
                 self.load_next_image()
             }
@@ -168,13 +184,12 @@ impl ImageChooserApp {
                 self.queue = SelectionQueue::MainUnseen;
                 self.review_after_position = None;
                 self.zoom = false;
+                self.clear_preload();
                 self.status = "Zurück zur normalen Auswahl.".to_owned();
                 self.load_next_image()
             }
-            Message::ImageLoaded(finished) => {
-                self.finish_image_load(finished);
-                Task::none()
-            }
+            Message::ImageLoaded(finished) => self.finish_image_load(finished),
+            Message::ImagePreloaded(finished) => self.finish_preload(finished),
             Message::CloseZoom => {
                 self.zoom = false;
                 Task::none()
@@ -467,6 +482,7 @@ impl ImageChooserApp {
         self.queue = undo.queue;
         self.review_after_position = undo.review_after_position;
         self.zoom = false;
+        self.clear_preload();
         self.refresh_counts();
 
         let image_result = self
@@ -524,6 +540,7 @@ impl ImageChooserApp {
             Ok(None) => {
                 self.current = None;
                 self.load_state = LoadState::Idle;
+                self.clear_preload();
                 self.refresh_counts();
                 Task::none()
             }
@@ -537,11 +554,31 @@ impl ImageChooserApp {
     fn load_current_image(&mut self) -> Task<Message> {
         let Some(current) = &self.current else {
             self.load_state = LoadState::Idle;
+            self.clear_preload();
             return Task::none();
         };
 
         let image_id = current.id;
         let path = current.path.clone();
+
+        match &self.preload {
+            PreloadState::Ready {
+                image_id: preloaded_id,
+                result,
+            } if *preloaded_id == image_id => {
+                let result = result.clone();
+                self.clear_preload();
+                return self.finish_image_load(ImageLoadFinished { image_id, result });
+            }
+            PreloadState::Loading {
+                image_id: preloaded_id,
+            } if *preloaded_id == image_id => {
+                self.load_state = LoadState::Loading;
+                return Task::none();
+            }
+            _ => self.clear_preload(),
+        }
+
         self.load_state = LoadState::Loading;
 
         Task::perform(
@@ -555,12 +592,12 @@ impl ImageChooserApp {
         )
     }
 
-    fn finish_image_load(&mut self, finished: ImageLoadFinished) {
+    fn finish_image_load(&mut self, finished: ImageLoadFinished) -> Task<Message> {
         if !matches!(
             self.current.as_ref(),
             Some(current) if current.id == finished.image_id
         ) {
-            return;
+            return Task::none();
         }
 
         match finished.result {
@@ -582,6 +619,88 @@ impl ImageChooserApp {
                 self.load_state = LoadState::Failed { message };
             }
         }
+
+        self.start_preload_next()
+    }
+
+    fn finish_preload(&mut self, finished: ImageLoadFinished) -> Task<Message> {
+        if !matches!(
+            &self.preload,
+            PreloadState::Loading { image_id } if *image_id == finished.image_id
+        ) {
+            return Task::none();
+        }
+
+        if matches!(
+            self.current.as_ref(),
+            Some(current) if current.id == finished.image_id
+        ) {
+            self.clear_preload();
+            return self.finish_image_load(finished);
+        }
+
+        // Keep preload errors in memory only; `last_error` describes images the user
+        // actually reaches.
+        self.preload = PreloadState::Ready {
+            image_id: finished.image_id,
+            result: finished.result,
+        };
+        Task::none()
+    }
+
+    fn start_preload_next(&mut self) -> Task<Message> {
+        let Some(current_position) = self.current.as_ref().map(|current| current.position) else {
+            self.clear_preload();
+            return Task::none();
+        };
+        let Some(project) = &self.project else {
+            self.clear_preload();
+            return Task::none();
+        };
+
+        let next = match self.queue {
+            SelectionQueue::MainUnseen => project.next_unseen_after(Some(current_position)),
+            SelectionQueue::ReviewLater => project.next_undecided_after(Some(current_position)),
+        };
+
+        let next = match next {
+            Ok(Some(image)) => image,
+            Ok(None) => {
+                self.clear_preload();
+                return Task::none();
+            }
+            Err(error) => {
+                self.clear_preload();
+                self.status = format!("Nächstes Bild konnte nicht vorgeladen werden: {error}");
+                return Task::none();
+            }
+        };
+
+        if matches!(
+            &self.preload,
+            PreloadState::Loading { image_id } | PreloadState::Ready { image_id, .. }
+                if *image_id == next.id
+        ) {
+            return Task::none();
+        }
+
+        let image_id = next.id;
+        let path = next.path.clone();
+        self.preload = PreloadState::Loading { image_id };
+
+        Task::perform(
+            async move {
+                ImageLoadFinished {
+                    image_id,
+                    result: load_image_for_display(path),
+                }
+            },
+            Message::ImagePreloaded,
+        )
+    }
+
+    fn clear_preload(&mut self) {
+        self.preload = PreloadState::Idle;
     }
 
     fn refresh_counts(&mut self) {

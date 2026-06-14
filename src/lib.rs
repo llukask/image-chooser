@@ -34,6 +34,9 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+// Imported positions start at 1, so 0 is a safe sentinel for "before the queue".
+const POSITION_BEFORE_FIRST: i64 = 0;
+
 pub fn default_project_path() -> Result<PathBuf> {
     let base_dirs = BaseDirs::new().ok_or(Error::NoUserDataDir)?;
     Ok(base_dirs
@@ -285,11 +288,22 @@ impl Project {
     }
 
     pub fn next_unseen(&self) -> Result<Option<ImageChoice>> {
+        self.next_unseen_after(None)
+    }
+
+    pub fn next_unseen_after(&self, after_position: Option<i64>) -> Result<Option<ImageChoice>> {
         let conn = self.conn.borrow();
         let mut stmt = conn.prepare(
-            "SELECT * FROM image_choices WHERE status = 'unseen' ORDER BY position LIMIT 1",
+            "SELECT * FROM image_choices
+             WHERE status = 'unseen' AND position > ?1
+             ORDER BY position LIMIT 1",
         )?;
-        stmt.query_row([], image_from_row).optional()?.transpose()
+        stmt.query_row(
+            params![after_position.unwrap_or(POSITION_BEFORE_FIRST)],
+            image_from_row,
+        )
+        .optional()?
+        .transpose()
     }
 
     pub fn next_undecided_after(&self, after_position: Option<i64>) -> Result<Option<ImageChoice>> {
@@ -299,9 +313,12 @@ impl Project {
              WHERE status = 'undecided' AND position > ?1
              ORDER BY position LIMIT 1",
         )?;
-        stmt.query_row(params![after_position.unwrap_or(0)], image_from_row)
-            .optional()?
-            .transpose()
+        stmt.query_row(
+            params![after_position.unwrap_or(POSITION_BEFORE_FIRST)],
+            image_from_row,
+        )
+        .optional()?
+        .transpose()
     }
 
     pub fn set_status(&self, id: i64, status: ImageStatus) -> Result<()> {

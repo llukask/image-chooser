@@ -82,6 +82,36 @@ fn import_reimport_and_queue_rules_preserve_decisions_and_stable_positions() {
 }
 
 #[test]
+fn unseen_lookahead_query_skips_current_image_to_preload_the_next_choice() {
+    let temp = TempDir::new().expect("create temp dir");
+    let project =
+        Project::open_or_create(temp.path().join("project.sqlite")).expect("open project");
+    let source = temp.path().join("source");
+    write_photo(&source.join("a.jpg"));
+    write_photo(&source.join("b.jpg"));
+    write_photo(&source.join("c.jpg"));
+    project
+        .import_folder(&source)
+        .expect("import source folder");
+    let images = project.images_by_position().expect("list images");
+    project
+        .set_status(images[1].id, ImageStatus::Rejected)
+        .expect("mark middle rejected");
+
+    let next_after_first = project
+        .next_unseen_after(Some(images[0].position))
+        .expect("query next unseen after current")
+        .expect("has next unseen");
+    assert_eq!(next_after_first.filename(), "c.jpg");
+    assert!(
+        project
+            .next_unseen_after(Some(next_after_first.position))
+            .expect("query after final unseen")
+            .is_none()
+    );
+}
+
+#[test]
 fn later_review_query_advances_by_position_without_mixing_in_unseen_images() {
     let temp = TempDir::new().expect("create temp dir");
     let project =
