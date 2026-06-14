@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use iced::{
-    ContentFit, Element, Length, Subscription, Task, Theme, event, keyboard, mouse,
+    Alignment, Background, Border, Color, ContentFit, Element, Length, Shadow, Subscription, Task,
+    Theme, Vector, event, keyboard, mouse,
     widget::{button, column, container, image as iced_image, row, text},
 };
 use image_chooser::{ImageChoice, ImageStatus, Project, StatusCounts, default_project_path};
@@ -269,14 +270,14 @@ impl ImageChooserApp {
             text("Projekt einrichten").size(34),
             text(&self.status).size(24),
             text("Bitte zuerst im Terminal ausführen:").size(24),
-            text("image-chooser init").size(28),
-            text("image-chooser import /pfad/zu/fotos").size(28),
-            text("image-chooser gui").size(28),
+            command_line("image-chooser init"),
+            command_line("image-chooser import /pfad/zu/fotos"),
+            command_line("image-chooser gui"),
         ]
         .spacing(24)
-        .padding(40);
+        .padding(42);
 
-        centered(content).into()
+        app_page(centered(container(content).style(panel_style))).into()
     }
 
     fn view_completion(&self) -> Element<'_, Message> {
@@ -286,16 +287,17 @@ impl ImageChooserApp {
                 SelectionQueue::ReviewLater => "Fertig: keine Später-Bilder mehr",
             })
             .size(50),
-            text(counts_text(self.counts)).size(28),
+            counts_badges(self.counts),
             text(&self.status).size(24),
         ]
         .spacing(24)
-        .padding(40);
+        .padding(42);
 
         if self.queue == SelectionQueue::MainUnseen && self.counts.undecided > 0 {
             content = content.push(
                 button(text("Später entscheiden ansehen").size(34))
                     .padding(24)
+                    .style(button::warning)
                     .on_press(Message::StartReviewLater),
             );
         }
@@ -304,76 +306,82 @@ impl ImageChooserApp {
             content = content.push(
                 button(text("Zur normalen Auswahl zurück").size(30))
                     .padding(20)
+                    .style(button::secondary)
                     .on_press(Message::ExitReviewLater),
             );
         }
 
-        centered(content).into()
+        app_page(centered(container(content).style(panel_style))).into()
     }
 
     fn view_selection(&self) -> Element<'_, Message> {
         let current = self.current.as_ref().expect("current image exists");
-        let header = row![
+        let title = row![
             text(current.filename()).size(34),
-            text(queue_text(self.queue)).size(24),
-            text(counts_text(self.counts)).size(24),
+            text(format!("· {}", queue_text(self.queue))).size(20),
         ]
-        .spacing(30);
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
+
+        let header = container(
+            row![title, counts_badges(self.counts)]
+                .spacing(24)
+                .align_y(Alignment::Center),
+        )
+        .padding(12)
+        .width(Length::Fill)
+        .style(toolbar_style);
 
         let image_area = self.view_image_area(false);
 
         let button_width = Length::Fixed(220.0);
         let undo_button = if self.undo_stack.is_empty() {
-            button(text("Rückgängig").size(32).width(Length::Fill).center())
-                .padding(22)
+            button(action_label("Rückgängig", "U"))
+                .padding(18)
                 .width(button_width)
+                .style(button::secondary)
         } else {
-            button(text("Rückgängig").size(32).width(Length::Fill).center())
-                .padding(22)
+            button(action_label("Rückgängig", "U"))
+                .padding(18)
                 .width(button_width)
+                .style(button::secondary)
                 .on_press(Message::Undo)
         };
 
         let controls = row![
-            button(text("Ja").size(32).width(Length::Fill).center())
-                .padding(22)
+            button(action_label("Ja", "Y"))
+                .padding(18)
                 .width(button_width)
+                .style(button::success)
                 .on_press(Message::Choose(ChoiceAction::Select)),
-            button(text("Nein").size(32).width(Length::Fill).center())
-                .padding(22)
+            button(action_label("Nein", "N"))
+                .padding(18)
                 .width(button_width)
+                .style(button::danger)
                 .on_press(Message::Choose(ChoiceAction::Reject)),
-            button(text("Später").size(32).width(Length::Fill).center())
-                .padding(22)
+            button(action_label("Später", "L"))
+                .padding(18)
                 .width(button_width)
+                .style(button::warning)
                 .on_press(Message::Choose(ChoiceAction::Later)),
             undo_button,
         ]
-        .spacing(18);
+        .spacing(16);
 
-        let centered_controls = container(controls)
+        let action_bar = container(controls)
+            .padding(18)
             .width(Length::Fill)
-            .center_x(Length::Fill);
+            .center_x(Length::Fill)
+            .style(toolbar_style);
 
-        let shortcuts =
-            text("Tastenkürzel: Y = Ja · N = Nein · L = Später · U = Rückgängig").size(20);
-
-        let content = column![
-            header,
-            image_area,
-            centered_controls,
-            shortcuts,
-            text(&self.status).size(22)
-        ]
-        .spacing(18)
-        .padding(24)
-        .width(Length::Fill)
-        .height(Length::Fill);
-
-        container(content)
+        let content = column![header, image_area, action_bar]
+            .spacing(16)
+            .padding(18)
             .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+            .height(Length::Fill);
+
+        app_page(content).into()
     }
 
     fn view_zoom(&self) -> Element<'_, Message> {
@@ -383,31 +391,38 @@ impl ImageChooserApp {
             .map(ImageChoice::filename)
             .unwrap_or_else(|| "Kein Bild".to_owned());
 
-        let content = column![
+        let header = container(
             row![
-                text(filename).size(30),
+                text(filename).size(30).width(Length::Fill),
                 button(text("Zurück (Esc)").size(30))
                     .padding(18)
+                    .style(button::secondary)
                     .on_press(Message::CloseZoom),
             ]
             .spacing(30),
-            self.view_image_area(true),
-        ]
-        .spacing(18)
-        .padding(20)
+        )
+        .padding(18)
         .width(Length::Fill)
-        .height(Length::Fill);
+        .style(toolbar_style);
 
-        container(content)
+        let content = column![header, self.view_image_area(true)]
+            .spacing(16)
+            .padding(18)
             .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+            .height(Length::Fill);
+
+        app_page(content).into()
     }
 
     fn view_image_area(&self, _zoom: bool) -> Element<'_, Message> {
         let body: Element<'_, Message> = match &self.load_state {
             LoadState::Idle => text("Kein Bild geladen").size(34).into(),
-            LoadState::Loading => text("Bild wird geladen …").size(38).into(),
+            LoadState::Loading => column![
+                text("Bild wird geladen …").size(38),
+                text("Bitte kurz warten").size(22)
+            ]
+            .spacing(12)
+            .into(),
             LoadState::Loaded { image } => column![
                 iced_image(image.handle.clone())
                     .content_fit(ContentFit::Contain)
@@ -432,6 +447,7 @@ impl ImageChooserApp {
                 text(message).size(20),
                 button(text("Später").size(34))
                     .padding(24)
+                    .style(button::warning)
                     .on_press(Message::Choose(ChoiceAction::Later)),
             ]
             .spacing(20)
@@ -444,6 +460,9 @@ impl ImageChooserApp {
             .height(Length::Fill)
             .center_x(Length::Fill)
             .center_y(Length::Fill)
+            .padding(18)
+            .clip(true)
+            .style(image_panel_style)
             .into()
     }
 
@@ -776,6 +795,138 @@ fn load_image_for_display(path: PathBuf) -> Result<LoadedImage, String> {
     })
 }
 
+fn app_page<'a>(content: impl Into<Element<'a, Message>>) -> container::Container<'a, Message> {
+    container(content)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(app_background_style)
+}
+
+fn counts_badges<'a>(counts: StatusCounts) -> Element<'a, Message> {
+    row![
+        count_badge("Neu", counts.unseen, Color::from_rgb8(59, 130, 246)),
+        count_badge("Ausgewählt", counts.selected, Color::from_rgb8(22, 163, 74)),
+        count_badge("Später", counts.undecided, Color::from_rgb8(217, 119, 6)),
+        count_badge(
+            "Abgelehnt",
+            counts.rejected,
+            Color::from_rgb8(107, 114, 128)
+        ),
+    ]
+    .spacing(8)
+    .into()
+}
+
+fn count_badge<'a>(label: &'static str, count: i64, color: Color) -> Element<'a, Message> {
+    container(
+        column![
+            text(label).size(13).width(Length::Fill).center(),
+            text(count.to_string())
+                .size(22)
+                .width(Length::Fill)
+                .center(),
+        ]
+        .spacing(2),
+    )
+    .width(Length::Fixed(108.0))
+    .padding(8)
+    .style(badge_style(color))
+    .into()
+}
+
+fn action_label<'a>(label: &'a str, shortcut: &'a str) -> Element<'a, Message> {
+    column![
+        text(label).size(30).width(Length::Fill).center(),
+        text(shortcut).size(16).width(Length::Fill).center(),
+    ]
+    .spacing(2)
+    .into()
+}
+
+fn command_line<'a>(command: &'a str) -> Element<'a, Message> {
+    container(text(command).size(26))
+        .padding(14)
+        .width(Length::Fill)
+        .style(command_style)
+        .into()
+}
+
+fn app_background_style(_: &Theme) -> container::Style {
+    container::Style::default().background(Color::from_rgb8(241, 245, 249))
+}
+
+fn toolbar_style(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::from_rgb8(255, 255, 255))),
+        border: Border {
+            radius: 16.0.into(),
+            width: 1.0,
+            color: Color::from_rgb8(226, 232, 240),
+        },
+        shadow: subtle_shadow(),
+        ..container::Style::default()
+    }
+}
+
+fn panel_style(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::from_rgb8(255, 255, 255))),
+        border: Border {
+            radius: 22.0.into(),
+            width: 1.0,
+            color: Color::from_rgb8(226, 232, 240),
+        },
+        shadow: subtle_shadow(),
+        ..container::Style::default()
+    }
+}
+
+fn image_panel_style(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::from_rgb8(248, 250, 252))),
+        border: Border {
+            radius: 20.0.into(),
+            width: 1.0,
+            color: Color::from_rgb8(203, 213, 225),
+        },
+        shadow: subtle_shadow(),
+        ..container::Style::default()
+    }
+}
+
+fn command_style(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::from_rgb8(15, 23, 42))),
+        text_color: Some(Color::from_rgb8(226, 232, 240)),
+        border: Border {
+            radius: 12.0.into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
+fn badge_style(color: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: Some(Background::Color(Color { a: 0.10, ..color })),
+        text_color: Some(color),
+        border: Border {
+            radius: 14.0.into(),
+            width: 1.0,
+            color: Color { a: 0.22, ..color },
+        },
+        ..container::Style::default()
+    }
+}
+
+fn subtle_shadow() -> Shadow {
+    Shadow {
+        color: Color::from_rgba(15.0 / 255.0, 23.0 / 255.0, 42.0 / 255.0, 0.10),
+        offset: Vector::new(0.0, 3.0),
+        blur_radius: 18.0,
+    }
+}
+
 fn scroll_delta_y(delta: mouse::ScrollDelta) -> f32 {
     match delta {
         mouse::ScrollDelta::Lines { y, .. } | mouse::ScrollDelta::Pixels { y, .. } => y,
@@ -800,13 +951,6 @@ fn centered<'a>(content: impl Into<Element<'a, Message>>) -> container::Containe
         .height(Length::Fill)
         .center_x(Length::Fill)
         .center_y(Length::Fill)
-}
-
-fn counts_text(counts: StatusCounts) -> String {
-    format!(
-        "Neu: {} · Ausgewählt: {} · Später: {} · Abgelehnt: {}",
-        counts.unseen, counts.selected, counts.undecided, counts.rejected
-    )
 }
 
 fn queue_text(queue: SelectionQueue) -> &'static str {
