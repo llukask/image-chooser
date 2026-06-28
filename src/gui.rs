@@ -270,7 +270,6 @@ impl ImageChooserApp {
             text("Projekt einrichten").size(34),
             text(&self.status).size(24),
             text("Bitte zuerst im Terminal ausführen:").size(24),
-            command_line("image-chooser init"),
             command_line("image-chooser import /pfad/zu/fotos"),
             command_line("image-chooser gui"),
         ]

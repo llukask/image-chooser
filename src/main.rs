@@ -22,7 +22,7 @@ fn main() -> iced::Result {
         }
         other => {
             if let Err(error) = run_cli_command(other) {
-                eprintln!("Fehler: {error}");
+                eprintln!("Error: {error}");
                 process::exit(1);
             }
             Ok(())
@@ -33,9 +33,6 @@ fn main() -> iced::Result {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CliCommand {
     Gui {
-        project: Option<PathBuf>,
-    },
-    Init {
         project: Option<PathBuf>,
     },
     Import {
@@ -66,13 +63,6 @@ impl CliCommand {
                     project: Some(project.into()),
                 }),
                 _ => Err("Aufruf: image-chooser gui [project.sqlite]".to_owned()),
-            },
-            "init" => match args.as_slice() {
-                [_] => Ok(Self::Init { project: None }),
-                [_, project] => Ok(Self::Init {
-                    project: Some(project.into()),
-                }),
-                _ => Err("Aufruf: image-chooser init [project.sqlite]".to_owned()),
             },
             "import" => match args.as_slice() {
                 [_, folder] => Ok(Self::Import {
@@ -113,12 +103,6 @@ impl CliCommand {
 
 fn run_cli_command(command: CliCommand) -> image_chooser::Result<()> {
     match command {
-        CliCommand::Init { project } => {
-            let project_path = resolve_project_path(project)?;
-            let project = Project::open_or_create(project_path)?;
-            println!("Projekt bereit: {}", project.path().display());
-            println!("Nächster Schritt: image-chooser import <photo-folder>");
-        }
         CliCommand::Import { project, folder } => {
             let project_path = resolve_project_path(project)?;
             let project = Project::open_or_create(project_path)?;
@@ -198,7 +182,7 @@ fn print_status_counts(counts: StatusCounts) {
 }
 
 fn usage() -> &'static str {
-    "Benutzung:\n  image-chooser                              GUI mit Standardprojekt starten\n  image-chooser gui [project.sqlite]         GUI starten\n  image-chooser init [project.sqlite]        Projektdatei erstellen/öffnen\n  image-chooser import [project.sqlite] <photo-folder>\n  image-chooser stats [project.sqlite]\n  image-chooser export [project.sqlite] <target-folder>\n\nOhne project.sqlite wird das Standardprojekt im Benutzer-Datenordner verwendet.\n\nBeispiel:\n  image-chooser init\n  image-chooser import /pfad/zu/fotos\n  image-chooser gui"
+    "Benutzung:\n  image-chooser                              GUI mit Standardprojekt starten\n  image-chooser gui [project.sqlite]         GUI starten\n  image-chooser import [project.sqlite] <photo-folder>\n  image-chooser stats [project.sqlite]\n  image-chooser export [project.sqlite] <target-folder>\n\nOhne project.sqlite wird das Standardprojekt im Benutzer-Datenordner verwendet.\n\nBeispiel:\n  image-chooser import /pfad/zu/fotos\n  image-chooser gui"
 }
 
 #[cfg(test)]
